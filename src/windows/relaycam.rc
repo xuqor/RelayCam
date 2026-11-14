@@ -1,0 +1,4 @@
+1 24 "src/windows/relaycam.manifest"
+201 RCDATA "build/wide/RelayCamFilter.dll"
+202 RCDATA "build/narrow/RelayCamFilter.dll"
+203 RCDATA "build/narrow/RelayCamRegister32.exe"
