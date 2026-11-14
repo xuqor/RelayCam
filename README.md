@@ -1,4 +1,4 @@
-# RelayCam 0.2.3
+# RelayCam Android 0.2.4 / Windows 0.2.3
 
 RelayCam is a free, local Wi-Fi phone webcam. The Android app sends H.264
 video over an encrypted connection. The Windows app decodes it and serves it
@@ -6,7 +6,7 @@ to desktop apps through a DirectShow virtual camera with a configurable name.
 
 ## Setup
 
-Use RelayCam 0.2.3 on both devices for the lighting improvements. Install the APK over the previous version.
+Use RelayCam 0.2.4 on Android with the 0.2.3 Windows EXE. Install the APK over the previous version.
 
 1. Open RelayCam.exe on x64 Windows 10 or 11. Enter the name you want to see in your camera apps and click **Apply camera name**. Approve the Windows administrator prompt to register 32-bit and 64-bit camera filters.
 2. Install RelayCam.apk on Android 6.0 or later and allow camera access. Connect both devices to the same local network. Choose a camera and capture mode, then tap **Start camera**.
@@ -47,6 +47,19 @@ when available. Choose 50 Hz or 60 Hz to match local mains frequency if indoor
 lighting produces rolling bands or pulses. **Low light** uses a wider exposure
 frame-rate range where the camera offers one, and can reduce actual FPS.
 Windows normalizes full-range H.264 levels for the outgoing feed and preview.
+
+## Battery and bitrate
+
+Android dims the RelayCam window after five seconds of live video. Tap the
+screen to restore brightness. It dims again after five seconds without a
+touch. Stopping video or leaving the app restores the previous setting.
+
+Choose **Video bitrate** before tapping **Start camera**. Auto targets
+4 Mbps at 720p/30 and scales with the capture mode. The phone's encoder
+may clamp the request to its supported range.
+
+The phone batches encrypted frames in a 128 KiB output buffer, with a short
+eight-millisecond batching window. The frame protocol is unchanged.
 
 ## Rebuild
 

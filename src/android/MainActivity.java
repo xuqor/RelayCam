@@ -18,9 +18,6 @@ import java.net.*;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.*;
-import javax.crypto.Cipher;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 
 public final class MainActivity extends Activity {
     private static final String AVC = "video/avc";
@@ -42,6 +39,21 @@ public final class MainActivity extends Activity {
     private boolean loadingLighting;
     private Button action;
     private Session running;
+    private Spinner bitrate;
+    private final Handler brightnessHandler = new Handler(Looper.getMainLooper());
+    private static final long DIM_DELAY_MS = 5000;
+    private float originalBrightness;
+    private boolean screenDimmed;
+    private boolean videoActive;
+    private boolean wakeTouch;
+    private final Runnable dimScreen = () -> {
+        if (!videoActive || running == null || screenDimmed || !hasWindowFocus()) return;
+        WindowManager.LayoutParams attributes = getWindow().getAttributes();
+        originalBrightness = attributes.screenBrightness;
+        attributes.screenBrightness = 0.01f;
+        getWindow().setAttributes(attributes);
+        screenDimmed = true;
+    };
 
     private static final class Mode {
         final Size size;
@@ -86,6 +98,10 @@ public final class MainActivity extends Activity {
         label(panel, "Resolution and frame rate", 14);
         profiles = new Spinner(this);
         panel.addView(profiles, row());
+        label(panel, "Video bitrate", 14);
+        bitrate = new Spinner(this);
+        panel.addView(bitrate, row());
+        bitrate.setEnabled(false);
         action = new Button(this);
         action.setAllCaps(false);
         action.setText("Start camera");
@@ -248,6 +264,61 @@ public final class MainActivity extends Activity {
     private void updateLowLightAvailability() {
         Mode mode = (Mode) profiles.getSelectedItem();
         lowLight.setEnabled(mode != null && mode.lowLightRange != null);
+        updateBitrateChoices(mode);
+    }
+
+    private static int automaticBitrate(Mode mode) {
+        // 4 Mbps at 720p30, scaled for resolution and frame rate.
+        return (int) Math.min(36_000_000L,
+                4_000_000L * mode.size.getWidth() * mode.size.getHeight() * mode.fps / (1280L * 720 * 30));
+    }
+
+    private void updateBitrateChoices(Mode mode) {
+        ArrayList<String> labels = new ArrayList<>();
+        labels.add(mode == null ? "Auto" : String.format(Locale.ROOT, "Auto (%.1f Mbps)",
+                automaticBitrate(mode) / 1_000_000.0));
+        for (int value : BITRATE_OPTIONS_MBPS) labels.add(value + " Mbps");
+        int previous = Math.max(0, bitrate.getSelectedItemPosition());
+        bitrate.setAdapter(adapter(labels));
+        bitrate.setSelection(previous);
+        bitrate.setEnabled(mode != null && running == null);
+    }
+
+    private static final int[] BITRATE_OPTIONS_MBPS = {1, 2, 4, 6, 8, 12, 20, 30, 36};
+
+    private void scheduleDim() {
+        brightnessHandler.removeCallbacks(dimScreen);
+        if (videoActive && hasWindowFocus()) brightnessHandler.postDelayed(dimScreen, DIM_DELAY_MS);
+    }
+
+    private void restoreBrightness() {
+        brightnessHandler.removeCallbacks(dimScreen);
+        if (!screenDimmed) return;
+        WindowManager.LayoutParams attributes = getWindow().getAttributes();
+        attributes.screenBrightness = originalBrightness;
+        getWindow().setAttributes(attributes);
+        screenDimmed = false;
+    }
+
+    @Override public boolean dispatchTouchEvent(android.view.MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == android.view.MotionEvent.ACTION_DOWN) {
+            wakeTouch = screenDimmed;
+            restoreBrightness();
+            scheduleDim();
+        }
+        if (wakeTouch) {
+            if (action == android.view.MotionEvent.ACTION_UP ||
+                    action == android.view.MotionEvent.ACTION_CANCEL) wakeTouch = false;
+            return true;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) scheduleDim();
+        else restoreBrightness();
     }
 
     private void loadModes(String cameraId) {
@@ -355,8 +426,12 @@ public final class MainActivity extends Activity {
             status.setText("Join the same local Wi-Fi as your PC first.");
             return;
         }
-        running = new Session(cameraIds.get(cameras.getSelectedItemPosition()),
-                modes.get(profiles.getSelectedItemPosition()));
+        Mode mode = modes.get(profiles.getSelectedItemPosition());
+        int choice = bitrate.getSelectedItemPosition();
+        int requestedBitrate = choice <= 0 ? automaticBitrate(mode) :
+                BITRATE_OPTIONS_MBPS[choice - 1] * 1_000_000;
+        running = new Session(cameraIds.get(cameras.getSelectedItemPosition()), mode, requestedBitrate);
+        bitrate.setEnabled(false);
         address.setText("Phone IP  " + ip);
         status.setText("Enter the phone IP in RelayCam on Windows, then approve the connection here.");
         cameras.setEnabled(false);
@@ -370,6 +445,9 @@ public final class MainActivity extends Activity {
     private void stop(String reason) {
         Session session = running;
         running = null;
+        videoActive = false;
+        restoreBrightness();
+        bitrate.setEnabled(profiles.getSelectedItem() != null);
         if (session != null) session.close();
         address.setText("Connect both devices to the same Wi-Fi.");
         status.setText(reason);
@@ -387,6 +465,8 @@ public final class MainActivity extends Activity {
     private final class Session {
         final String cameraId;
         final Mode mode;
+        final int requestedBitrate;
+        int activeBitrate;
         AlertDialog pairingDialog;
         volatile ArrayBlockingQueue<Boolean> pending;
         final HandlerThread worker = new HandlerThread("RelayCam capture");
@@ -411,9 +491,10 @@ public final class MainActivity extends Activity {
         long lastRateUpdate;
         int encodedFrames;
 
-        Session(String cameraId, Mode mode) {
+        Session(String cameraId, Mode mode, int requestedBitrate) {
             this.cameraId = cameraId;
             this.mode = mode;
+            this.requestedBitrate = requestedBitrate;
         }
 
         void start() {
@@ -455,10 +536,10 @@ public final class MainActivity extends Activity {
                 MediaFormat format = MediaFormat.createVideoFormat(AVC, w, h);
                 format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                         MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-                int bitrate = Math.min(36_000_000, w * h * mode.fps / 12);
                 Range<Integer> limits = encoder.getCodecInfo().getCapabilitiesForType(AVC)
                         .getVideoCapabilities().getBitrateRange();
-                format.setInteger(MediaFormat.KEY_BIT_RATE, limits.clamp(bitrate));
+                activeBitrate = limits.clamp(requestedBitrate);
+                format.setInteger(MediaFormat.KEY_BIT_RATE, activeBitrate);
                 format.setInteger(MediaFormat.KEY_FRAME_RATE, mode.fps);
                 format.setInteger(MediaFormat.KEY_PRIORITY, 0);
                 format.setFloat(MediaFormat.KEY_OPERATING_RATE, mode.fps);
@@ -480,6 +561,12 @@ public final class MainActivity extends Activity {
                             if (!streaming) return;
                             updateEncoderRate();
                             if (awaitingKey && !key) return;
+                            if (awaitingKey) runOnUiThread(() -> {
+                                if (running == Session.this && streaming && !videoActive) {
+                                    videoActive = true;
+                                    scheduleDim();
+                                }
+                            });
                             awaitingKey = false;
                             ByteBuffer bytes = codec.getOutputBuffer(index);
                             if (bytes == null) return;
@@ -598,7 +685,8 @@ public final class MainActivity extends Activity {
             long elapsed = now - lastRateUpdate;
             if (elapsed >= 1000) {
                 message("Connected · " + mode + " target · " +
-                        Math.round(encodedFrames * 1000.0 / elapsed) + " fps encoded");
+                        Math.round(encodedFrames * 1000.0 / elapsed) + " fps encoded · " +
+                        String.format(Locale.ROOT, "%.1f Mbps target", activeBitrate / 1_000_000.0));
                 lastRateUpdate = now;
                 encodedFrames = 0;
             }
@@ -627,7 +715,7 @@ public final class MainActivity extends Activity {
                         socket.setTcpNoDelay(true);
                         socket.setSendBufferSize(128 * 1024);
                         DataInputStream in = new DataInputStream(socket.getInputStream());
-                        DataOutputStream out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
+                        DataOutputStream out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), StreamWriter.BUFFER_BYTES));
                         Pairing pairing = new Pairing();
                         byte[] serverPublic = pairing.publicKey();
                         out.writeInt(Pairing.MAGIC);
@@ -649,12 +737,11 @@ public final class MainActivity extends Activity {
                         out.writeByte(allowed ? 1 : 0);
                         out.flush();
                         if (!allowed) continue;
-                        SecretKeySpec videoKey = result.videoKey;
-                        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-                        long counter = 0;
+                        StreamWriter writer = new StreamWriter(out, result.videoKey);
                         byte[] header = ByteBuffer.allocate(12).putInt(mode.size.getWidth())
                                 .putInt(mode.size.getHeight()).putInt(mode.fps).array();
-                        sendPacket(out, cipher, videoKey, counter++, header);
+                        writer.write(header);
+                        writer.flush();
                         packets.clear();
                         resetPicture = true;
                         streaming = true;
@@ -668,7 +755,16 @@ public final class MainActivity extends Activity {
                         while (!closed) {
                             byte[] frame = packets.poll(8, TimeUnit.SECONDS);
                             if (frame == null || frame.length > MAX_PACKET) break;
-                            sendPacket(out, cipher, videoKey, counter++, frame);
+                            long deadline = SystemClock.elapsedRealtime() + 8;
+                            int written = writer.write(frame);
+                            while (!closed && written < StreamWriter.BUFFER_BYTES) {
+                                long remaining = deadline - SystemClock.elapsedRealtime();
+                                if (remaining <= 0) break;
+                                frame = packets.poll(remaining, TimeUnit.MILLISECONDS);
+                                if (frame == null) break;
+                                written += writer.write(frame);
+                            }
+                            if (!closed) writer.flush();
                         }
                     } catch (IOException e) {
                         if (closed) return;
@@ -676,7 +772,13 @@ public final class MainActivity extends Activity {
                         peer = null;
                         streaming = false;
                         packets.clear();
-                        if (!closed) message("Waiting for the Windows app to connect.");
+                        if (!closed) runOnUiThread(() -> {
+                            if (running == this) {
+                                videoActive = false;
+                                restoreBrightness();
+                                status.setText("Waiting for the Windows app to connect.");
+                            }
+                        });
                     }
                 }
             } catch (Exception e) {
@@ -727,16 +829,6 @@ public final class MainActivity extends Activity {
                 });
             }
         }
-    }
-
-    private static void sendPacket(DataOutputStream out, Cipher cipher, SecretKeySpec key,
-                                   long counter, byte[] packet) throws Exception {
-        byte[] nonce = ByteBuffer.allocate(12).putInt(0).putLong(counter).array();
-        cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, nonce));
-        byte[] encrypted = cipher.doFinal(packet);
-        out.writeInt(encrypted.length);
-        out.write(encrypted);
-        out.flush();
     }
 
     private static byte[] annexB(ByteBuffer bytes) {
