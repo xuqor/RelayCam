@@ -17,10 +17,17 @@ import javax.crypto.KeyAgreement;
 import javax.crypto.spec.SecretKeySpec;
 
 final class Pairing {
-    static final int MAGIC = 0x52434D32;
+    static final int MAGIC = 0x52434D33;
     static final int PUBLIC_SIZE = 64;
     static final int APPROVAL_SECONDS = 40;
     private final KeyPair keys;
+
+    static byte[] proof(byte[] trust, byte[] session, String role) throws Exception {
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(trust, "HmacSHA256"));
+        mac.update(role.getBytes(StandardCharsets.US_ASCII));
+        return mac.doFinal(session);
+    }
 
     Pairing() throws Exception {
         KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
@@ -58,7 +65,8 @@ final class Pairing {
             byte[] display = derive("RelayCam2 display", secret, serverPublic, clientPublic);
             long value = ByteBuffer.wrap(display).getInt() & 0xffffffffL;
             return new Result(String.format(Locale.ROOT, "%06d", value % 1_000_000),
-                new SecretKeySpec(derive("RelayCam2 video", secret, serverPublic, clientPublic), "AES"));
+                new SecretKeySpec(derive("RelayCam2 video", secret, serverPublic, clientPublic), "AES"),
+                derive("RelayCam3 trust", secret, serverPublic, clientPublic));
         } finally {
             Arrays.fill(secret, (byte) 0);
         }
@@ -77,9 +85,12 @@ final class Pairing {
         final String code;
         final SecretKeySpec videoKey;
 
-        Result(String code, SecretKeySpec videoKey) {
+        final byte[] trust;
+
+        Result(String code, SecretKeySpec videoKey, byte[] trust) {
             this.code = code;
             this.videoKey = videoKey;
+            this.trust = trust;
         }
     }
 }

@@ -1,6 +1,7 @@
 #include "network.hpp"
 #include "frame_orientation.hpp"
 #include <bcrypt.h>
+#include <dpapi.h>
 #include <ws2tcpip.h>
 #include <algorithm>
 #include <array>
@@ -28,16 +29,57 @@ struct Peer {
 using PublicKey = std::array<uint8_t, 64>;
 using Digest = std::array<uint8_t, 32>;
 
-bool sha256(const uint8_t* data, ULONG size, Digest& result) {
+bool sha256(const uint8_t* data, ULONG size, Digest& result, const Digest* key = nullptr) {
     BCRYPT_ALG_HANDLE algorithm = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) return false;
-    bool ok = BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) >= 0 &&
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, key ? BCRYPT_ALG_HANDLE_HMAC_FLAG : 0) < 0) return false;
+    bool ok = BCryptCreateHash(algorithm, &hash, nullptr, 0,
+            key ? const_cast<PUCHAR>(key->data()) : nullptr, key ? key->size() : 0, 0) >= 0 &&
         BCryptHashData(hash, const_cast<PUCHAR>(data), size, 0) >= 0 &&
         BCryptFinishHash(hash, result.data(), result.size(), 0) >= 0;
     if (hash) BCryptDestroyHash(hash);
     BCryptCloseAlgorithmProvider(algorithm, 0);
     return ok;
+}
+
+constexpr wchar_t trustRegistry[] = L"Software\\RelayCam\\TrustedPhones";
+
+bool loadTrustedPhone(const std::wstring& host, Digest& token) {
+    std::array<BYTE, 1024> storage{};
+    DWORD bytes = storage.size();
+    if (RegGetValueW(HKEY_CURRENT_USER, trustRegistry, host.c_str(), RRF_RT_REG_BINARY,
+            nullptr, storage.data(), &bytes) != ERROR_SUCCESS) return false;
+    DATA_BLOB input{bytes, storage.data()}, output{};
+    if (!CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr,
+            CRYPTPROTECT_UI_FORBIDDEN, &output)) return false;
+    bool valid = output.cbData == token.size();
+    if (valid) std::memcpy(token.data(), output.pbData, token.size());
+    SecureZeroMemory(output.pbData, output.cbData);
+    LocalFree(output.pbData);
+    return valid;
+}
+
+bool saveTrustedPhone(const std::wstring& host, Digest& token) {
+    DATA_BLOB input{static_cast<DWORD>(token.size()), token.data()}, output{};
+    if (!CryptProtectData(&input, L"RelayCam trusted phone", nullptr, nullptr, nullptr,
+            CRYPTPROTECT_UI_FORBIDDEN, &output)) return false;
+    LONG result = RegSetKeyValueW(HKEY_CURRENT_USER, trustRegistry, host.c_str(), REG_BINARY,
+        output.pbData, output.cbData);
+    LocalFree(output.pbData);
+    return result == ERROR_SUCCESS;
+}
+
+bool pairingProof(const Digest& key, const Digest& session, const char* role, Digest& proof) {
+    std::array<uint8_t, 6 + 32> material{};
+    auto next = std::copy_n(role, 6, material.begin());
+    std::copy(session.begin(), session.end(), next);
+    return sha256(material.data(), material.size(), proof, &key);
+}
+
+bool matchesProof(const Digest& a, const Digest& b) {
+    uint8_t difference = 0;
+    for (size_t i = 0; i < a.size(); ++i) difference |= a[i] ^ b[i];
+    return difference == 0;
 }
 
 struct Pairing {
@@ -70,7 +112,7 @@ struct Pairing {
         return true;
     }
 
-    bool finish(const PublicKey& serverPublic, Digest& display, Digest& videoKey) {
+    bool finish(const PublicKey& serverPublic, Digest& display, Digest& videoKey, Digest& trustKey) {
         Blob input;
         input.coordinates = serverPublic;
         Digest secret{};
@@ -84,7 +126,8 @@ struct Pairing {
             // CNG returns the raw ECDH secret in little-endian order.
             std::reverse(secret.begin(), secret.end());
             ok = derive("RelayCam2 display", secret, serverPublic, display) &&
-                derive("RelayCam2 video", secret, serverPublic, videoKey);
+                derive("RelayCam2 video", secret, serverPublic, videoKey) &&
+                derive("RelayCam3 trust", secret, serverPublic, trustKey);
         }
         SecureZeroMemory(secret.data(), secret.size());
         return ok;
@@ -275,7 +318,9 @@ StreamStatus receive(const std::wstring& host, SharedFrame* frames, HANDLE mutex
     uint8_t magic[4]{};
     if (!read(magic, sizeof(magic))) return InvalidStream;
     if (bigInt(magic) == 0x52434D31) return OldAndroid;
-    if (bigInt(magic) != 0x52434D32) return InvalidStream;
+    bool v3 = bigInt(magic) == 0x52434D33;
+    if (!v3 && bigInt(magic) != 0x52434D32) return InvalidStream;
+    if (!v3 && connection.trustedOnly) return TrustRequired;
     Digest commitment{};
     if (!read(commitment.data(), commitment.size())) return InvalidStream;
 
@@ -289,16 +334,45 @@ StreamStatus receive(const std::wstring& host, SharedFrame* frames, HANDLE mutex
         !sha256(serverPublic.data(), serverPublic.size(), actualCommitment) ||
         commitment != actualCommitment) return InvalidStream;
 
-    Digest display{}, videoKey{};
+    Digest display{}, videoKey{}, trustKey{};
     Cipher cipher;
-    bool ready = pairing.finish(serverPublic, display, videoKey) && cipher.setup(videoKey);
+    bool ready = pairing.finish(serverPublic, display, videoKey, trustKey) && cipher.setup(videoKey);
     SecureZeroMemory(videoKey.data(), videoKey.size());
     if (!ready) return CryptoError;
-    PostMessageW(window, statusMessage, AwaitingApproval, bigInt(display.data()) % 1000000);
+    Digest saved{};
+    bool hasSaved = false;
+    if (v3) {
+        std::array<uint8_t, 65> request{};
+        request[0] = connection.trustedOnly ? 2 : connection.remember ? 1 : 0;
+        hasSaved = connection.remember && loadTrustedPhone(host, saved);
+        if (connection.trustedOnly && !hasSaved) return TrustRequired;
+        if (hasSaved) {
+            Digest id{}, proof{};
+            if (!sha256(saved.data(), saved.size(), id) || !pairingProof(saved, trustKey, "client", proof))
+                return CryptoError;
+            std::copy(id.begin(), id.end(), request.begin() + 1);
+            std::copy(proof.begin(), proof.end(), request.begin() + 33);
+        }
+        if (!socketCopy(peer.socket, request.data(), request.size(), true, cancel)) return Disconnected;
+    }
+    if (!connection.trustedOnly)
+        PostMessageW(window, statusMessage, AwaitingApproval, bigInt(display.data()) % 1000000);
     uint8_t accepted = 0;
-    if (!read(&accepted, 1, 45000)) return Disconnected;
-    if (accepted == 0) return PairingDeclined;
-    if (accepted != 1) return InvalidStream;
+    if (!read(&accepted, 1, connection.trustedOnly ? 2500 : 45000))
+        return connection.trustedOnly ? TrustRequired : Disconnected;
+    if (accepted == 2 && v3 && hasSaved) {
+        Digest serverProof{}, expected{};
+        if (!read(serverProof.data(), serverProof.size()) ||
+                !pairingProof(saved, trustKey, "server", expected) || !matchesProof(serverProof, expected))
+            return TrustRequired;
+    } else if (connection.trustedOnly) {
+        return TrustRequired;
+    } else if (accepted == 0) {
+        return PairingDeclined;
+    } else if (accepted != 1 && !(v3 && accepted == 3 && connection.remember)) {
+        return InvalidStream;
+    }
+    SecureZeroMemory(saved.data(), saved.size());
     PostMessageW(window, statusMessage, Approved, 0);
 
     uint8_t size[4]{};
@@ -311,6 +385,8 @@ StreamStatus receive(const std::wstring& host, SharedFrame* frames, HANDLE mutex
     VideoMode mode{static_cast<int>(bigInt(header)), static_cast<int>(bigInt(header + 4)),
         static_cast<int>(bigInt(header + 8))};
     if (!knownMode(mode.width, mode.height, mode.fps)) return InvalidStream;
+    if (accepted == 3) saveTrustedPhone(host, trustKey);
+    SecureZeroMemory(trustKey.data(), trustKey.size());
 
     Decoder decoder;
     if (!decoder.open()) return DecoderError;
@@ -325,6 +401,17 @@ StreamStatus receive(const std::wstring& host, SharedFrame* frames, HANDLE mutex
         if (!read(encrypted.data(), length)) return Disconnected;
         if (av_new_packet(decoder.packet, length - 16) < 0) return DecoderError;
         if (!cipher.decrypt(n, encrypted, decoder.packet->data)) return InvalidStream;
+        if (v3 && decoder.packet->size == 16 && bigInt(decoder.packet->data) == 0x52434D43) {
+            const auto* change = decoder.packet->data + 4;
+            VideoMode requested{static_cast<int>(bigInt(change)), static_cast<int>(bigInt(change + 4)),
+                static_cast<int>(bigInt(change + 8))};
+            if (!knownMode(requested.width, requested.height, requested.fps)) return InvalidStream;
+            av_packet_unref(decoder.packet);
+            avcodec_flush_buffers(decoder.context);
+            mode = requested;
+            deadline = GetTickCount64() + 7000;
+            continue;
+        }
         ++received;
         const unsigned before = decoded;
         if (!decoder.push(frames, mutex, mode, connection.flipHorizontal.load(), decoded, published)) return DecoderError;
@@ -347,6 +434,17 @@ StreamStatus receive(const std::wstring& host, SharedFrame* frames, HANDLE mutex
     }
     return Cancelled;
 }
+}
+
+bool hasTrustedPhone(const std::wstring& host) {
+    Digest token{};
+    bool found = loadTrustedPhone(host, token);
+    SecureZeroMemory(token.data(), token.size());
+    return found;
+}
+
+void forgetTrustedPhone(const std::wstring& host) {
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, trustRegistry, host.c_str());
 }
 
 void Connection::run(const std::wstring& host, SharedFrame* frames,

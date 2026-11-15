@@ -27,10 +27,11 @@ done
 i686-w64-mingw32-g++-posix -std=c++17 -O2 -s -municode -mwindows -static \
   -DUNICODE -D_UNICODE -o build/narrow/RelayCamRegister32.exe src/windows/register32.cpp -lole32
 x86_64-w64-mingw32-windres --preprocessor x86_64-w64-mingw32-gcc-posix \
+  --preprocessor-arg=-E --preprocessor-arg=-xc-header --preprocessor-arg=-DRC_INVOKED \
   -i src/windows/relaycam.rc -o build/relaycam-res.o
 x86_64-w64-mingw32-g++-posix -std=c++17 -O2 -s -municode -mwindows -static \
   -DUNICODE -D_UNICODE -DNOMINMAX -D_WIN32_WINNT=0x0A00 \
   -Ibuild/ffmpeg-7.1.3 -Ibuild/ffmpeg -o out/RelayCam.exe src/windows/app.cpp \
   src/windows/network.cpp build/relaycam-res.o build/ffmpeg/libavcodec/libavcodec.a \
   build/ffmpeg/libavutil/libavutil.a -lws2_32 -lbcrypt -lcomctl32 -lshell32 \
-  -lole32 -luuid -lgdi32 -lpsapi -lm
+  -lole32 -luuid -lgdi32 -lpsapi -lcrypt32 -lm

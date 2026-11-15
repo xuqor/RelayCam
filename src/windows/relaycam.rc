@@ -2,3 +2,5 @@
 201 RCDATA "build/wide/RelayCamFilter.dll"
 202 RCDATA "build/narrow/RelayCamFilter.dll"
 203 RCDATA "build/narrow/RelayCamRegister32.exe"
+
+101 ICON "src/windows/relaycam.ico"

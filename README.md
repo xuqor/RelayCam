@@ -1,4 +1,4 @@
-# RelayCam Android 0.2.4 / Windows 0.2.3
+# RelayCam 0.3.1
 
 RelayCam is a free, local Wi-Fi phone webcam. The Android app sends H.264
 video over an encrypted connection. The Windows app decodes it and serves it
@@ -6,7 +6,9 @@ to desktop apps through a DirectShow virtual camera with a configurable name.
 
 ## Setup
 
-Use RelayCam 0.2.4 on Android with the 0.2.3 Windows EXE. Install the APK over the previous version.
+Use version 0.3.0 or later on both devices for trusted connections and live camera switching.
+Android 0.3.x uses a different signing key from 0.2.x. If Android rejects an update from an older
+build, uninstall the old app first, then install this APK and pair again.
 
 1. Open RelayCam.exe on x64 Windows 10 or 11. Enter the name you want to see in your camera apps and click **Apply camera name**. Approve the Windows administrator prompt to register 32-bit and 64-bit camera filters.
 2. Install RelayCam.apk on Android 6.0 or later and allow camera access. Connect both devices to the same local network. Choose a camera and capture mode, then tap **Start camera**.
@@ -21,6 +23,25 @@ decoding and the local network. The receiving app can choose a lower format
 and frame rate. A 720p/30 fps stream is a sensible starting point on older PCs.
 Apps that require Media Foundation cameras exclusively may not discover RelayCam.
 The Windows build is unsigned. This release streams video only.
+
+## Trusted devices and background streaming
+
+On Windows, check **Remember and auto-connect** before pairing. Verify the
+six-digit code and choose **Allow and remember** on Android. Windows then
+reconnects to a trusted phone at its saved IP whenever RelayCam is running
+on both devices. If the phone IP changes, enter the new IP and pair again.
+**Forget phone** removes the credential for the IP shown on Windows.
+**Forget trusted PCs** on Android revokes the phone's saved approvals.
+
+Minimize the Windows app to the notification area. Double-click the tray
+icon to reopen it, or right-click it to exit.
+
+Start the camera with RelayCam visible on Android. It can keep streaming
+while minimized, with a foreground notification that includes **Stop camera**.
+Use **Switch front / rear** during a stream to change lenses. RelayCam keeps
+the current mode where supported and can fall back to 720p or 480p at 30 fps.
+The Android interface rotates with the phone. This controls the interface
+orientation separately from the video.
 
 ## Check the camera orientation
 

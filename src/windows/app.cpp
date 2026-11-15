@@ -17,6 +17,15 @@ constexpr int nameId = 104;
 constexpr int addressId = 105;
 constexpr int flipId = 106;
 constexpr int previewId = 107;
+constexpr int rememberId = 108, forgetId = 109, trayOpenId = 110, trayExitId = 111;
+constexpr UINT trayMessage = WM_APP + 2;
+constexpr UINT showExisting = WM_APP + 3;
+constexpr UINT_PTR reconnectTimer = 2;
+UINT taskbarCreated = 0;
+bool trayHidden = false;
+bool allowReconnect = true;
+bool automaticAttempt = false;
+HWND rememberButton, forgetButton;
 constexpr UINT_PTR previewTimerId = 1;
 
 HINSTANCE instance;
@@ -351,11 +360,21 @@ void configureWindow(HWND window) {
             nullptr, &flipped, &flipBytes) == ERROR_SUCCESS) connection.flipHorizontal = flipped != 0;
     SendMessageW(flipButton, BM_SETCHECK, connection.flipHorizontal ? BST_CHECKED : BST_UNCHECKED, 0);
     statusLabel = control(window, L"STATIC", L"Apply a camera name once to install the virtual camera.",
-        0, 0, 28, 373, 464, 48);
+        0, 0, 28, 417, 464, 48);
+    rememberButton = control(window, L"BUTTON", L"Remember and auto-connect",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 0, 28, 368, 290, 32, rememberId);
+    forgetButton = control(window, L"BUTTON", L"Forget phone", BS_PUSHBUTTON | WS_TABSTOP,
+        0, 336, 368, 156, 32, forgetId);
+    DWORD enabled = 0, bytes = sizeof(enabled);
+    RegGetValueW(HKEY_CURRENT_USER, registryPath, L"AutoConnect", RRF_RT_REG_DWORD, nullptr, &enabled, &bytes);
+    SendMessageW(rememberButton, BM_SETCHECK, enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SetTimer(window, reconnectTimer, 4000, nullptr);
 }
 
-void toggleConnection(HWND window) {
+void toggleConnection(HWND window, bool automatic = false) {
     if (worker.joinable()) {
+        if (automatic) return;
+        allowReconnect = false;
         connection.cancel = true;
         stopping = true;
         EnableWindow(connectButton, FALSE);
@@ -367,6 +386,10 @@ void toggleConnection(HWND window) {
         status(L"Enter the phone’s IPv4 address.");
         return;
     }
+
+    const bool remember = SendMessageW(rememberButton, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (automatic && (!allowReconnect || !remember || !hasTrustedPhone(address))) return;
+    if (!automatic) allowReconnect = true;
 
     if (!frames) {
         frameMutex = CreateMutexW(nullptr, FALSE, frameLock);
@@ -386,6 +409,9 @@ void toggleConnection(HWND window) {
     }
 
     connection.cancel = false;
+    connection.remember = remember;
+    connection.trustedOnly = automatic;
+    automaticAttempt = automatic;
     stopping = false;
     try {
         worker = std::thread(&Connection::run, &connection, address, frames, frameMutex, window);
@@ -394,6 +420,8 @@ void toggleConnection(HWND window) {
         return;
     }
     EnableWindow(addressEdit, FALSE);
+    EnableWindow(rememberButton, FALSE);
+    EnableWindow(forgetButton, FALSE);
     SetWindowTextW(connectButton, L"Disconnect");
     status(L"Connecting to the phone…");
 }
@@ -437,11 +465,18 @@ void streamMessage(WPARAM state, LPARAM detail) {
     if (worker.joinable()) worker.join();
     EnableWindow(connectButton, TRUE);
     EnableWindow(addressEdit, TRUE);
+    EnableWindow(rememberButton, TRUE);
+    EnableWindow(forgetButton, TRUE);
     SetWindowTextW(connectButton, L"Connect phone");
     switch (state) {
         case Cancelled: status(L"Disconnected."); break;
         case InvalidAddress: status(L"Enter the phone’s IPv4 address as shown on Android."); break;
-        case Unreachable: status(L"Could not reach the phone. Check Wi-Fi and start the Android app."); break;
+        case Unreachable: status(automaticAttempt ? L"Waiting for the trusted phone…" :
+            L"Could not reach the phone. Check Wi-Fi and start the Android app."); break;
+        case TrustRequired:
+            allowReconnect = false;
+            status(L"Phone needs approval. Click Connect phone to pair again.");
+            break;
         case PairingDeclined: status(L"Pairing was declined or timed out. Click Connect phone to try again."); break;
         case OldAndroid: status(L"Update the Android app to RelayCam 0.2 to use tap-to-pair."); break;
         case InvalidStream: status(L"The incoming stream could not be authenticated or read."); break;
@@ -451,9 +486,63 @@ void streamMessage(WPARAM state, LPARAM detail) {
     }
 }
 
+bool addTray(HWND window) {
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = window;
+    icon.uID = 1;
+    icon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    icon.uCallbackMessage = trayMessage;
+    icon.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(101));
+    lstrcpyW(icon.szTip, L"RelayCam");
+    return Shell_NotifyIconW(NIM_ADD, &icon);
+}
+
+void restoreFromTray(HWND window) {
+    if (trayHidden) {
+        NOTIFYICONDATAW icon{};
+        icon.cbSize = sizeof(icon);
+        icon.hWnd = window;
+        icon.uID = 1;
+        Shell_NotifyIconW(NIM_DELETE, &icon);
+        trayHidden = false;
+    }
+    ShowWindow(window, SW_RESTORE);
+    SetForegroundWindow(window);
+}
+
 LRESULT CALLBACK windowProc(HWND window, UINT msg, WPARAM w, LPARAM l) {
+    if (taskbarCreated && msg == taskbarCreated && trayHidden) {
+        if (!addTray(window)) restoreFromTray(window);
+        return 0;
+    }
     switch (msg) {
         case WM_CREATE: configureWindow(window); return 0;
+        case showExisting: restoreFromTray(window); return 0;
+        case WM_SIZE:
+            if (w == SIZE_MINIMIZED && !trayHidden && addTray(window)) {
+                trayHidden = true;
+                ShowWindow(window, SW_HIDE);
+            }
+            return 0;
+        case WM_TIMER:
+            if (w == reconnectTimer) toggleConnection(window, true);
+            return 0;
+        case trayMessage:
+            if (l == WM_LBUTTONDBLCLK) restoreFromTray(window);
+            else if (l == WM_RBUTTONUP || l == WM_CONTEXTMENU) {
+                HMENU menu = CreatePopupMenu();
+                if (!menu) return 0;
+                AppendMenuW(menu, MF_STRING, trayOpenId, L"Open RelayCam");
+                AppendMenuW(menu, MF_STRING, trayExitId, L"Exit");
+                POINT cursor{};
+                GetCursorPos(&cursor);
+                SetForegroundWindow(window);
+                TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, nullptr);
+                DestroyMenu(menu);
+                PostMessageW(window, WM_NULL, 0, 0);
+            }
+            return 0;
         case WM_CTLCOLORSTATIC:
             SetTextColor(reinterpret_cast<HDC>(w), RGB(23,30,48));
             SetBkMode(reinterpret_cast<HDC>(w), TRANSPARENT);
@@ -467,6 +556,18 @@ LRESULT CALLBACK windowProc(HWND window, UINT msg, WPARAM w, LPARAM l) {
         case WM_COMMAND:
             switch (LOWORD(w)) {
                 case connectId: toggleConnection(window); return 0;
+                case trayOpenId: restoreFromTray(window); return 0;
+                case trayExitId: DestroyWindow(window); return 0;
+                case rememberId: {
+                    DWORD enabled = SendMessageW(rememberButton, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    RegSetKeyValueW(HKEY_CURRENT_USER, registryPath, L"AutoConnect", REG_DWORD, &enabled, sizeof(enabled));
+                    allowReconnect = true;
+                    return 0;
+                }
+                case forgetId:
+                    forgetTrustedPhone(getText(addressEdit));
+                    status(L"Phone forgotten.");
+                    return 0;
                 case installId: changeCamera(window, false); return 0;
                 case removeId: changeCamera(window, true); return 0;
                 case previewId: showPreview(window); return 0;
@@ -481,6 +582,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT msg, WPARAM w, LPARAM l) {
             break;
         case statusMessage: streamMessage(w, l); return 0;
         case WM_DESTROY:
+            KillTimer(window, reconnectTimer);
+            if (trayHidden) {
+                NOTIFYICONDATAW icon{};
+                icon.cbSize = sizeof(icon);
+                icon.hWnd = window;
+                icon.uID = 1;
+                Shell_NotifyIconW(NIM_DELETE, &icon);
+            }
             if (preview) DestroyWindow(preview);
             connection.cancel = true;
             if (worker.joinable()) worker.join();
@@ -517,12 +626,15 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int show) {
     singleInstance = CreateMutexW(nullptr, FALSE, L"Local\\RelayCam.App.1");
     if (!singleInstance || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (singleInstance) CloseHandle(singleInstance);
-        MessageBoxW(nullptr, L"RelayCam is already open or could not start.", L"RelayCam", MB_ICONINFORMATION);
+        HWND existing = FindWindowW(L"RelayCamMain", nullptr);
+        if (existing) PostMessageW(existing, showExisting, 0, 0);
+        else MessageBoxW(nullptr, L"RelayCam could not start.", L"RelayCam", MB_ICONINFORMATION);
         CoUninitialize();
         return 1;
     }
 
     InitCommonControls();
+    taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     dpi = GetDpiForSystem();
     const wchar_t kind[] = L"RelayCamMain";
     WNDCLASSW klass{};
@@ -530,18 +642,19 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int show) {
     klass.lpfnWndProc = windowProc;
     klass.lpszClassName = kind;
     klass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    klass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    klass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(101));
     RegisterClassW(&klass);
     klass.lpfnWndProc = previewProc;
     klass.lpszClassName = L"RelayCamPreview";
     RegisterClassW(&klass);
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT size{0, 0, px(520), px(435)};
+    RECT size{0, 0, px(520), px(485)};
     AdjustWindowRect(&size, style, FALSE);
     HWND window = CreateWindowW(kind, L"RelayCam", style, CW_USEDEFAULT, CW_USEDEFAULT,
         size.right - size.left, size.bottom - size.top, nullptr, nullptr, app, nullptr);
     if (window) {
         ShowWindow(window, show);
+        toggleConnection(window, true);
         MSG message{};
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {
             if (!IsDialogMessageW(window, &message)) {
