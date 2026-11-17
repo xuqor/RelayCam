@@ -4,10 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.hardware.camera2.*;
-import android.hardware.camera2.params.StreamConfigurationMap;
-import android.media.*;
 import android.os.*;
 import android.util.Range;
 import android.util.Size;
@@ -17,11 +14,21 @@ import java.net.*;
 import java.util.*;
 
 public final class MainActivity extends Activity {
-    private static final String AVC = "video/avc";
+    private static final int BACKGROUND = 0xFF15151B;
+    private static final int CARD = 0xFF202029;
+    private static final int BORDER = 0xFF383744;
+    private static final int TEXT = 0xFFF4F1FB;
+    private static final int MUTED = 0xFFC0BCCC;
+    private static final int ACCENT = 0xFFC9B9FF;
     private final ArrayList<Mode> modes = new ArrayList<>();
     private final ArrayList<String> cameraIds = new ArrayList<>();
     private Spinner cameras;
     private Spinner profiles;
+    private Button at30, at60;
+    private TextView modeHint;
+    private int preferredFps = 30;
+    private Mode selectedMode;
+    private boolean allControlsReady;
     private TextView address;
     private TextView status;
     private TextView exposureLabel;
@@ -59,20 +66,19 @@ public final class MainActivity extends Activity {
         final int fps;
         final Range<Integer> range, lowLightRange;
         final String codec;
+        final boolean highSpeed;
 
-        Mode(Size size, int fps, Range<Integer> range, Range<Integer> lowLightRange, String codec) {
+        Mode(Size size, int fps, Range<Integer> range, Range<Integer> lowLightRange, String codec, boolean highSpeed) {
             this.size = size;
             this.fps = fps;
             this.range = range;
             this.lowLightRange = lowLightRange;
             this.codec = codec;
+            this.highSpeed = highSpeed;
         }
 
         @Override public String toString() {
-            String label = size.getWidth() == 2048 ? "2K" :
-                    (size.getHeight() == 1440 ? "1440p (QHD)" :
-                    (size.getHeight() == 2160 ? "4K" : size.getHeight() + "p"));
-            return label + "  ·  " + fps + " fps";
+            return resolutionName(size) + " · " + fps + " fps";
         }
     }
 
@@ -83,49 +89,87 @@ public final class MainActivity extends Activity {
         }
 
         ScrollView scroll = new ScrollView(this);
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(36), dp(28), dp(36), dp(28));
-        panel.setBackgroundColor(Color.rgb(20, 23, 30));
-        scroll.addView(panel);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(BACKGROUND);
+        LinearLayout page = new LinearLayout(this);
+        page.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        page.setPadding(dp(18), dp(20), dp(18), dp(24));
+        scroll.addView(page);
+        LinearLayout stack = new LinearLayout(this);
+        stack.setOrientation(LinearLayout.VERTICAL);
+        int usableWidth = getResources().getDisplayMetrics().widthPixels - dp(36);
+        page.addView(stack, new LinearLayout.LayoutParams(Math.min(dp(560), usableWidth), -2));
         if (Build.VERSION.SDK_INT >= 30) {
             scroll.setOnApplyWindowInsetsListener((view, insets) -> {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() |
                     WindowInsets.Type.displayCutout());
                 view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                int width = view.getWidth() - bars.left - bars.right - dp(36);
+                if (width > 0) updatePageWidth(stack, width);
                 return insets;
             });
         }
+        scroll.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) ->
+            updatePageWidth(stack, right - left - view.getPaddingLeft() - view.getPaddingRight() - dp(36)));
         setContentView(scroll);
-        label(panel, "RelayCam", 30);
-        address = label(panel, "Connect both devices to the same Wi-Fi.", 16);
-        label(panel, "Camera", 14);
-        cameras = new Spinner(this);
-        panel.addView(cameras, row());
-        switchCamera = new Button(this);
-        switchCamera.setAllCaps(false);
-        switchCamera.setText("Switch front / rear");
-        switchCamera.setVisibility(View.GONE);
-        panel.addView(switchCamera, row());
-        switchCamera.setOnClickListener(v -> switchLens());
-        label(panel, "Resolution and frame rate", 14);
-        profiles = new Spinner(this);
-        panel.addView(profiles, row());
-        label(panel, "Video bitrate", 14);
-        bitrate = new Spinner(this);
-        panel.addView(bitrate, row());
-        bitrate.setEnabled(false);
+        TextView heading = label(stack, "RelayCam", 32);
+        heading.setTypeface(android.graphics.Typeface.create("sans-serif-medium", 0));
+
+        LinearLayout connection = card(stack);
+        address = label(connection, "Connect both devices to the same Wi-Fi.", 15);
+        status = label(connection, "Ready to connect", 14);
+        status.setTextColor(MUTED);
         action = new Button(this);
-        action.setAllCaps(false);
         action.setText("Start camera");
         action.setEnabled(false);
-        panel.addView(action, row());
-        status = label(panel, "Streaming can continue in the background.", 15);
+        styleButton(action, true);
+        connection.addView(action, row());
+        switchCamera = new Button(this);
+        switchCamera.setText("Switch front / rear");
+        styleButton(switchCamera, false);
+        switchCamera.setVisibility(View.GONE);
+        connection.addView(switchCamera, row());
+        switchCamera.setOnClickListener(v -> switchLens());
+
+        LinearLayout capture = card(stack);
+        section(capture, "Capture");
+        field(capture, "Camera");
+        cameras = new Spinner(this);
+        capture.addView(cameras, row());
+        field(capture, "Resolution");
+        profiles = new Spinner(this);
+        capture.addView(profiles, row());
+        field(capture, "Frame rate");
+        LinearLayout rates = new LinearLayout(this);
+        at30 = rateButton(rates, 30);
+        at60 = rateButton(rates, 60);
+        capture.addView(rates, row());
+        modeHint = label(capture, "", 13);
+        modeHint.setTextColor(MUTED);
+        field(capture, "Video bitrate");
+        bitrate = new Spinner(this);
+        capture.addView(bitrate, row());
+        bitrate.setEnabled(false);
+
+        LinearLayout advanced = card(stack);
+        Button settings = new Button(this);
+        settings.setText("Show lighting and pairing");
+        styleButton(settings, false);
+        advanced.addView(settings, row());
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setVisibility(View.GONE);
+        advanced.addView(panel);
+        settings.setOnClickListener(v -> {
+            boolean open = panel.getVisibility() != View.VISIBLE;
+            panel.setVisibility(open ? View.VISIBLE : View.GONE);
+            settings.setText(open ? "Hide lighting and pairing" : "Show lighting and pairing");
+        });
         exposureLabel = label(panel, "Exposure", 14);
         exposure = new SeekBar(this);
         panel.addView(exposure, row());
         Button resetExposure = new Button(this);
-        resetExposure.setAllCaps(false);
+        styleButton(resetExposure, false);
         resetExposure.setText("Reset exposure");
         panel.addView(resetExposure, row());
         resetExposure.setOnClickListener(v -> exposure.setProgress(-exposureFloor));
@@ -166,7 +210,7 @@ public final class MainActivity extends Activity {
         });
 
         forgetPcs = new Button(this);
-        forgetPcs.setAllCaps(false);
+        styleButton(forgetPcs, false);
         forgetPcs.setText("Forget trusted PCs");
         panel.addView(forgetPcs, row());
         forgetPcs.setOnClickListener(v -> new android.app.AlertDialog.Builder(this)
@@ -193,12 +237,15 @@ public final class MainActivity extends Activity {
             status.setText("Could not list cameras: " + e.getMessage());
         }
 
+        allControlsReady = true;
         cameras.setAdapter(adapter(names));
+        int rear = cameraFacing.indexOf(CameraCharacteristics.LENS_FACING_BACK);
+        if (rear >= 0) cameras.setSelection(rear);
         profiles.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                updateLowLightAvailability();
+                updateMode();
             }
-            @Override public void onNothingSelected(AdapterView<?> parent) { updateLowLightAvailability(); }
+            @Override public void onNothingSelected(AdapterView<?> parent) { updateMode(); }
         });
         cameras.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
@@ -219,18 +266,88 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams row() {
-        return new LinearLayout.LayoutParams(-1, dp(44));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(48));
+        params.bottomMargin = dp(6);
+        return params;
     }
 
     private TextView label(LinearLayout parent, String value, int size) {
         TextView text = new TextView(this);
         text.setText(value);
-        text.setTextColor(Color.rgb(233, 236, 245));
+        text.setTextColor(TEXT);
         text.setTextSize(size);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
         p.bottomMargin = dp(10);
         parent.addView(text, p);
         return text;
+    }
+
+    private void updatePageWidth(LinearLayout stack, int available) {
+        if (available <= 0) return;
+        int width = Math.min(dp(560), available);
+        if (stack.getLayoutParams().width != width) {
+            stack.getLayoutParams().width = width;
+            stack.requestLayout();
+        }
+    }
+
+    private android.graphics.drawable.GradientDrawable surface(int color, boolean bordered) {
+        android.graphics.drawable.GradientDrawable drawable = new android.graphics.drawable.GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(14));
+        if (bordered) drawable.setStroke(dp(1), BORDER);
+        return drawable;
+    }
+
+    private void styleButton(Button button, boolean prominent) {
+        int normal = prominent ? ACCENT : CARD;
+        android.graphics.drawable.StateListDrawable background = new android.graphics.drawable.StateListDrawable();
+        background.addState(new int[]{-android.R.attr.state_enabled}, surface(BORDER, false));
+        background.addState(new int[]{android.R.attr.state_selected}, surface(ACCENT, false));
+        background.addState(new int[]{}, surface(normal, !prominent));
+        button.setBackground(new android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(0x30766C8E), background, null));
+        button.setTextColor(new android.content.res.ColorStateList(
+            new int[][]{{-android.R.attr.state_enabled}, {android.R.attr.state_selected}, {}},
+            new int[]{MUTED, BACKGROUND, prominent ? BACKGROUND : TEXT}));
+        button.setAllCaps(false);
+        button.setTextSize(14);
+    }
+
+    private LinearLayout card(LinearLayout parent) {
+        LinearLayout group = new LinearLayout(this);
+        group.setOrientation(LinearLayout.VERTICAL);
+        group.setPadding(dp(16), dp(14), dp(16), dp(10));
+        group.setBackground(surface(CARD, true));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(12);
+        parent.addView(group, params);
+        return group;
+    }
+
+    private void section(LinearLayout parent, String title) {
+        label(parent, title, 19).setTypeface(android.graphics.Typeface.create("sans-serif-medium", 0));
+    }
+
+    private void field(LinearLayout parent, String title) {
+        label(parent, title, 13).setTextColor(MUTED);
+    }
+
+    private Button rateButton(LinearLayout parent, int fps) {
+        Button button = new Button(this);
+        button.setText(fps + " fps");
+        styleButton(button, false);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1);
+        if (fps == 30) params.rightMargin = dp(8);
+        parent.addView(button, params);
+        button.setOnClickListener(v -> { preferredFps = fps; updateMode(); });
+        return button;
+    }
+
+    private static String resolutionName(Size size) {
+        if (size.getWidth() == 3840) return "4K UHD";
+        if (size.getWidth() == 2048) return "2K";
+        return size.getHeight() + "p";
     }
 
     private void loadLighting(CameraCharacteristics camera) {
@@ -290,7 +407,7 @@ public final class MainActivity extends Activity {
     }
 
     private void updateLowLightAvailability() {
-        Mode mode = running == null ? (Mode) profiles.getSelectedItem() : running.mode;
+        Mode mode = running == null ? selectedMode : running.mode;
         lowLight.setEnabled(mode != null && mode.lowLightRange != null);
         updateBitrateChoices(mode);
     }
@@ -352,70 +469,54 @@ public final class MainActivity extends Activity {
     private void loadModes(String cameraId) {
         modes.clear();
         try {
-            CameraCharacteristics camera = getSystemService(CameraManager.class)
-                    .getCameraCharacteristics(cameraId);
+            CameraCharacteristics camera = getSystemService(CameraManager.class).getCameraCharacteristics(cameraId);
             loadLighting(camera);
-            StreamConfigurationMap map = camera.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            Range<Integer>[] ranges = camera.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
-            MediaCodecInfo[] codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
-            if (map != null && ranges != null && map.getOutputSizes(MediaCodec.class) != null) {
-                List<Size> supported = Arrays.asList(map.getOutputSizes(MediaCodec.class));
-                for (Size size : new Size[]{new Size(1280,720), new Size(1920,1080),
-                        new Size(2048,1080), new Size(2560,1440), new Size(3840,2160), new Size(640,480)}) {
-                    if (!supported.contains(size)) continue;
-                    long minFrameTime = map.getOutputMinFrameDuration(MediaCodec.class, size);
-                    for (int fps : (size.getHeight() == 480 ? new int[]{30} : new int[]{30, 60})) {
-                        if (minFrameTime > 0 && minFrameTime > 1_000_000_000.0 / fps * 1.015) continue;
-                        Range<Integer> preferred = null;
-                        Range<Integer> darker = null;
-                        for (Range<Integer> range : ranges) {
-                            if (range.getUpper() == fps &&
-                                    (preferred == null || range.getLower() > preferred.getLower())) {
-                                preferred = range;
-                            }
-                            if (range.getUpper() == fps && range.getLower() >= 15 &&
-                                    (darker == null || range.getLower() < darker.getLower())) darker = range;
-                        }
-                        if (preferred == null) continue;
-                        if (preferred.equals(darker)) darker = null;
-                        String selectedEncoder = null;
-                        for (MediaCodecInfo codec : codecs) {
-                            if (!codec.isEncoder()) continue;
-                            try {
-                                MediaCodecInfo.CodecCapabilities caps = codec.getCapabilitiesForType(AVC);
-                                boolean surface = false;
-                                for (int format : caps.colorFormats) {
-                                    if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surface = true;
-                                }
-                                if (surface && caps.getVideoCapabilities().areSizeAndRateSupported(
-                                        size.getWidth(), size.getHeight(), fps)) {
-                                    if (selectedEncoder == null) selectedEncoder = codec.getName();
-                                    if (hardwareEncoder(codec)) {
-                                        selectedEncoder = codec.getName();
-                                        break;
-                                    }
-                                }
-                            } catch (IllegalArgumentException ignored) {}
-                        }
-                        if (selectedEncoder != null) modes.add(new Mode(size, fps, preferred, darker, selectedEncoder));
-                    }
-                }
-            }
-        } catch (CameraAccessException e) {
-            status.setText("Camera unavailable: " + e.getMessage());
+            modes.addAll(CaptureModes.forCamera(camera));
+        } catch (CameraAccessException | RuntimeException e) {
+            showStatus("Camera unavailable: " + e.getMessage());
         }
-        profiles.setAdapter(adapter(new ArrayList<>(modes)));
-        updateLowLightAvailability();
-        action.setEnabled(!modes.isEmpty());
-        if (modes.isEmpty()) status.setText("This camera exposes none of the requested H.264 modes.");
-        else status.setText("Streaming can continue in the background.");
+        ArrayList<String> labels = new ArrayList<>();
+        for (Size size : CaptureModes.SIZES) {
+            boolean available = findMode(size, 30) != null || findMode(size, 60) != null;
+            labels.add(resolutionName(size) + " · " + size.getWidth() + " × " + size.getHeight() +
+                (available ? "" : " · unavailable"));
+        }
+
+        int position = profiles.getSelectedItemPosition();
+        if (position < 0 && !modes.isEmpty()) position = Arrays.asList(CaptureModes.SIZES).indexOf(modes.get(0).size);
+        profiles.setAdapter(adapter(labels));
+        profiles.setSelection(Math.max(0, position));
+        updateMode();
     }
 
-    private static boolean hardwareEncoder(MediaCodecInfo codec) {
-        if (Build.VERSION.SDK_INT >= 29) return codec.isHardwareAccelerated();
-        String name = codec.getName().toLowerCase(Locale.ROOT);
-        return !name.startsWith("omx.google.") && !name.startsWith("c2.android.") &&
-                !name.startsWith("c2.google.") && !name.startsWith("omx.ffmpeg.");
+    private Mode findMode(Size size, int fps) {
+        for (Mode mode : modes)
+            if (mode.size.equals(size) && mode.fps == fps) return mode;
+        return null;
+    }
+
+    private void updateMode() {
+        if (!allControlsReady || running != null) return;
+        int index = profiles.getSelectedItemPosition();
+        Size size = index >= 0 ? CaptureModes.SIZES[index] : null;
+        Mode normal = findMode(size, 30);
+        Mode fast = findMode(size, 60);
+        selectedMode = fast != null && (preferredFps == 60 || normal == null) ? fast : normal;
+        at30.setEnabled(normal != null);
+        at60.setEnabled(fast != null);
+        at30.setSelected(selectedMode != null && selectedMode.fps == 30);
+        at60.setSelected(selectedMode != null && selectedMode.fps == 60);
+        action.setEnabled(selectedMode != null && !starting);
+        if (selectedMode == null) showModeHint("This lens and H.264 encoder do not offer this resolution.");
+        else if (fast == null) showModeHint("60 fps is unavailable at this resolution with this camera.");
+        else if (selectedMode.highSpeed) showModeHint("60 fps uses the phone’s high-speed camera mode.");
+        else showModeHint("");
+        updateLowLightAvailability();
+    }
+
+    private void showModeHint(String message) {
+        modeHint.setText(message);
+        modeHint.setVisibility(message.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
@@ -460,34 +561,19 @@ public final class MainActivity extends Activity {
         String id = cameraIds.get(index);
         try {
             CameraCharacteristics lens = getSystemService(CameraManager.class).getCameraCharacteristics(id);
-            StreamConfigurationMap map = lens.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            Size[] sizes = map == null ? null : map.getOutputSizes(MediaCodec.class);
             Mode mode = running.mode;
-            Range<Integer>[] ranges = lens.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            List<Mode> available = CaptureModes.forCamera(lens);
             Mode replacement = null;
             for (Size size : new Size[]{mode.size, new Size(1280, 720), new Size(640, 480)}) {
-                if (replacement != null || sizes == null || !Arrays.asList(sizes).contains(size) || ranges == null)
-                    continue;
-                int fps = size.equals(mode.size) && replacement == null ? mode.fps : 30;
-                if (fps == 60) {
-                    boolean supports60 = false;
-                    for (Range<Integer> range : ranges) if (range.getUpper() == 60) supports60 = true;
-                    if (!supports60) fps = 30;
+                for (Mode candidate : available) {
+                    if (!candidate.size.equals(size)) continue;
+                    if (size.equals(mode.size) && candidate.fps == mode.fps) {
+                        replacement = candidate;
+                        break;
+                    }
+                    if (replacement == null && candidate.fps == 30) replacement = candidate;
                 }
-                long min = map.getOutputMinFrameDuration(MediaCodec.class, size);
-                if (min > 1_015_000_000.0 / fps) {
-                    fps = 30;
-                    if (min > 1_015_000_000.0 / fps) continue;
-                }
-                Range<Integer> candidate = null, alternate = null;
-                for (Range<Integer> range : ranges) {
-                    if (range.getUpper() != fps) continue;
-                    if (candidate == null || candidate.getLower() < range.getLower()) candidate = range;
-                    if (range.getLower() >= 15 && (alternate == null || alternate.getLower() > range.getLower()))
-                        alternate = range;
-                }
-                if (candidate != null)
-                    replacement = new Mode(size, fps, candidate, candidate.equals(alternate) ? null : alternate, mode.codec);
+                if (replacement != null) break;
             }
             if (replacement == null) {
                 showStatus("No compatible streaming mode found for the other camera.");
@@ -505,7 +591,7 @@ public final class MainActivity extends Activity {
 
     private void start() {
         if (starting || running != null || CameraService.pendingStart != null ||
-                profiles.getSelectedItemPosition() < 0) return;
+                selectedMode == null) return;
         if (Build.VERSION.SDK_INT >= 33 &&
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
                 !getPreferences(MODE_PRIVATE).getBoolean("asked-notifications", false)) {
@@ -518,7 +604,7 @@ public final class MainActivity extends Activity {
             status.setText("Join the same local Wi-Fi as your PC first.");
             return;
         }
-        Mode mode = modes.get(profiles.getSelectedItemPosition());
+        Mode mode = selectedMode;
         int choice = bitrate.getSelectedItemPosition();
         int requestedBitrate = choice <= 0 ? automaticBitrate(mode) :
                 BITRATE_OPTIONS_MBPS[choice - 1] * 1_000_000;
@@ -551,6 +637,9 @@ public final class MainActivity extends Activity {
         showStatus(service.status);
         cameras.setEnabled(false);
         profiles.setEnabled(false);
+        at30.setEnabled(false);
+        at60.setEnabled(false);
+        showModeHint("Streaming " + running.mode);
         bitrate.setEnabled(false);
         action.setEnabled(true);
         action.setText("Stop camera");
@@ -570,8 +659,7 @@ public final class MainActivity extends Activity {
         showStatus(reason);
         cameras.setEnabled(true);
         profiles.setEnabled(true);
-        bitrate.setEnabled(profiles.getSelectedItem() != null);
-        action.setEnabled(!modes.isEmpty());
+        updateMode();
         action.setText("Start camera");
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }

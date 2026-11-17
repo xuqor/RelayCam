@@ -1,4 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.relaycam.android" android:versionCode="7" android:versionName="0.3.1">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.relaycam.android" android:versionCode="8" android:versionName="0.3.2">
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/>
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.INTERNET"/>
@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <application android:icon="@mipmap/relaycam" android:label="RelayCam" android:allowBackup="false" android:theme="@android:style/Theme.Material.NoActionBar">
+    <application android:icon="@mipmap/relaycam" android:label="RelayCam" android:allowBackup="false" android:theme="@style/RelayCamTheme">
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="fullSensor" android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>

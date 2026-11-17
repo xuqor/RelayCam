@@ -1,4 +1,4 @@
-# RelayCam 0.3.1
+# RelayCam Android 0.3.2 / Windows 0.3.1
 
 RelayCam is a free, local Wi-Fi phone webcam. The Android app sends H.264
 video over an encrypted connection. The Windows app decodes it and serves it
@@ -23,6 +23,16 @@ decoding and the local network. The receiving app can choose a lower format
 and frame rate. A 720p/30 fps stream is a sensible starting point on older PCs.
 Apps that require Media Foundation cameras exclusively may not discover RelayCam.
 The Windows build is unsigned. This release streams video only.
+
+## Resolution and frame rate
+
+Choose the camera, then the resolution and either **30 fps** or **60 fps**.
+Unavailable resolutions remain visible, and unsupported frame-rate buttons
+are disabled. 4K UHD requires a 3840 × 2160 camera output and an H.264 encoder
+that supports the selected frame rate. On compatible Android 10+ devices,
+RelayCam can use a supported high-speed camera session and cap the encoder
+input at 60 fps when the regular camera session cannot reach 60. Use the
+live FPS readout to check actual throughput.
 
 ## Trusted devices and background streaming
 

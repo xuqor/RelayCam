@@ -1,0 +1,8 @@
+<resources>
+    <style name="RelayCamTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#C9B9FF</item>
+        <item name="android:windowBackground">#15151B</item>
+        <item name="android:colorBackgroundFloating">#25242F</item>
+        <item name="android:navigationBarColor">#15151B</item>
+    </style>
+</resources>

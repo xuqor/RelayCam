@@ -5,6 +5,8 @@ import android.content.Intent;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.hardware.camera2.*;
+import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.SessionConfiguration;
 import android.media.*;
 import android.util.Range;
 import android.view.Surface;
@@ -206,7 +208,11 @@ public final class CameraService extends Service {
                 format.setInteger(MediaFormat.KEY_PRIORITY, 0);
                 format.setFloat(MediaFormat.KEY_OPERATING_RATE, mode.fps);
                 format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
-                if (Build.VERSION.SDK_INT >= 29) format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
+                if (Build.VERSION.SDK_INT >= 29) {
+                    format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
+                    if (mode.range.getUpper() > mode.fps)
+                        format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, mode.fps);
+                }
                 encoder.setCallback(new MediaCodec.Callback() {
                     @Override public void onInputBufferAvailable(MediaCodec codec, int index) {}
                     @Override public void onOutputBufferAvailable(MediaCodec codec, int index, MediaCodec.BufferInfo info) {
@@ -350,14 +356,15 @@ public final class CameraService extends Service {
         void configureCamera() {
             try {
                 CameraDevice opening = camera;
-                opening.createCaptureSession(Collections.singletonList(surface), new CameraCaptureSession.StateCallback() {
+                captureRequest = opening.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+                captureRequest.addTarget(surface);
+                defaultAntiBanding = captureRequest.get(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE);
+                CaptureRequest initial = lightingRequest();
+                CameraCaptureSession.StateCallback callbacks = new CameraCaptureSession.StateCallback() {
                     @Override public void onConfigured(CameraCaptureSession session) {
                         if (closed || nextCamera != null || camera != opening) { session.close(); return; }
                         capture = session;
                         try {
-                            captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
-                            captureRequest.addTarget(surface);
-                            defaultAntiBanding = captureRequest.get(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE);
                             submitLighting();
                             requestKey();
                             lensReady = true;
@@ -371,7 +378,16 @@ public final class CameraService extends Service {
                     @Override public void onConfigureFailed(CameraCaptureSession session) {
                         if (!closed && nextCamera == null && camera == opening) fail("Camera rejected this mode. Try a lower resolution or frame rate.");
                     }
-                }, handler);
+                };
+                if (Build.VERSION.SDK_INT >= 28) {
+                    SessionConfiguration configuration = new SessionConfiguration(
+                        mode.highSpeed ? SessionConfiguration.SESSION_HIGH_SPEED : SessionConfiguration.SESSION_REGULAR,
+                        Collections.singletonList(new OutputConfiguration(surface)), task -> handler.post(task), callbacks);
+                    configuration.setSessionParameters(initial);
+                    opening.createCaptureSession(configuration);
+                } else {
+                    opening.createCaptureSession(Collections.singletonList(surface), callbacks, handler);
+                }
             } catch (CameraAccessException | RuntimeException e) {
                 fail("Camera could not create a capture session: " + e.getMessage());
             }
@@ -397,12 +413,22 @@ public final class CameraService extends Service {
 
         void submitLighting() throws CameraAccessException {
             if (closed || captureRequest == null || capture == null) return;
+            CaptureRequest request = lightingRequest();
+            if (capture instanceof CameraConstrainedHighSpeedCaptureSession) {
+                CameraConstrainedHighSpeedCaptureSession fast = (CameraConstrainedHighSpeedCaptureSession) capture;
+                fast.setRepeatingBurst(fast.createHighSpeedRequestList(request), null, handler);
+            } else {
+                capture.setRepeatingRequest(request, null, handler);
+            }
+        }
+
+        CaptureRequest lightingRequest() {
             Range<Integer> range = dimRoom && mode.lowLightRange != null ? mode.lowLightRange : mode.range;
             captureRequest.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range);
             captureRequest.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             captureRequest.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, exposureCompensation);
             captureRequest.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, antiBanding < 0 ? defaultAntiBanding : Integer.valueOf(antiBanding));
-            capture.setRepeatingRequest(captureRequest.build(), null, handler);
+            return captureRequest.build();
         }
 
         void updateEncoderRate() {
